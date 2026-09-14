@@ -1,0 +1,39 @@
+serverAddr = "47.108.216.163"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "c122f0f0ab477f8bc09450083befc0fb682882f6ba20da08"
+
+[[proxies]]
+name = "xiaozhi-ws"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8000
+remotePort = 8000
+
+[[proxies]]
+name = "xiaozhi-console"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8002
+remotePort = 8002
+
+[[proxies]]
+name = "xiaozhi-http"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8003
+remotePort = 8003
+
+[[proxies]]
+name = "wsl-tts-service"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 6007
+remotePort = 6007
+[[proxies]]
+name = "xiaozhi-mcp"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8004
+remotePort = 8004

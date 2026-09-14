@@ -1,0 +1,23 @@
+# ============================================================
+# frps 服务端配置 —— 放在阿里云 47.108.216.163 上运行
+# 适用 frp v0.52+（TOML 格式，请用最新版）
+# ============================================================
+
+# frpc 连接 frps 的控制端口（安全组需放行 TCP）
+bindPort = 7000
+
+# ---- 鉴权：必填！否则任何人都能把你的服务器当免费代理穿透 ----
+auth.method = "token"
+# 请替换成你自己的随机 token，生成方式：openssl rand -hex 24
+auth.token = "c122f0f0ab477f8bc09450083befc0fb682882f6ba20da08"
+
+# ---- 可选：frps 自带 Web 控制面板，方便看隧道状态 ----
+webServer.addr = "0.0.0.0"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "88888888"
+
+# 日志
+log.to = "/var/log/frps.log"
+log.level = "info"
+log.maxDays = 3
