@@ -59,8 +59,9 @@ recreate() {
 }
 
 echo "=== 小智服务端口体检（从宿主机探测）==="
-broken_svcs=()
-broken_ports=()
+broken_svcs=()      # 转发失效、需要重建的 compose 服务
+broken_ports=()     # 转发失效的端口
+down_ports=()       # 应用/容器本身没起来的端口，重建容器治不了
 
 for i in "${!PORTS[@]}"; do
     port=${PORTS[$i]}
@@ -79,6 +80,7 @@ for i in "${!PORTS[@]}"; do
     printf "  %-5s %-22s %-16s 不通   " "$port" "$desc" "$container"
     if ! docker inspect "$container" >/dev/null 2>&1; then
         echo "（容器不存在）"
+        down_ports+=("$port")
         continue
     fi
 
@@ -88,17 +90,23 @@ for i in "${!PORTS[@]}"; do
         broken_ports+=("$port")
     else
         echo "→ 容器内也不通，应用没起来，看 docker logs $container"
+        down_ports+=("$port")
     fi
 done
 
-if [ ${#broken_ports[@]} -eq 0 ]; then
+if [ ${#broken_ports[@]} -eq 0 ] && [ ${#down_ports[@]} -eq 0 ]; then
     echo "全部正常。"
     exit 0
 fi
 
 echo
+if [ ${#down_ports[@]} -gt 0 ]; then
+    echo "以下端口是应用/容器本身没起来，重建容器没用，先看 docker logs："
+    printf '    %s\n' "${down_ports[@]}"
+    echo
+fi
 if [ ${#broken_svcs[@]} -eq 0 ]; then
-    echo "有端口不通，但涉及的服务不在 $COMPOSE_FILE 里，请手动处理其部署方式。"
+    [ ${#broken_ports[@]} -gt 0 ] && echo "有端口转发失效，但涉及的服务不在 $COMPOSE_FILE 里，请手动处理其部署方式。"
     exit 1
 fi
 
