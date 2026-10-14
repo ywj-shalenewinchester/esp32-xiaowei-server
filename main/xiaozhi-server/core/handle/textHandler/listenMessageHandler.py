@@ -14,6 +14,7 @@ from core.handle.sendAudioHandle import send_stt_message, send_tts_message
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
 from core.utils.util import remove_punctuation_and_length
+from core.utils.turn_timer import start_turn
 from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 
 
@@ -40,6 +41,8 @@ class ListenTextMessageHandler(TextMessageHandler):
             if conn.asr is None:
                 return
 
+            # TTFT 计时起点：手动模式下用户说完话这一刻
+            start_turn(conn, force=True)
             conn.client_voice_stop = True
             if conn.asr.interface_type == InterfaceType.STREAM:
                 # 流式模式下，发送结束请求

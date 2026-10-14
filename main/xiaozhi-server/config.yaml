@@ -17,14 +17,14 @@ server:
   # 当你使用docker部署或使用公网部署(使用ssl、域名)时，不一定准确
   # 所以如果你使用docker部署时，将websocket设置成局域网地址
   # 如果你使用公网部署时，将vwebsocket设置成公网地址
-  websocket: ws://47.108.216.163:8000/xiaozhi/v1/
+  websocket: ws://111.10.160.135:8000/xiaozhi/v1/
   # 视觉分析接口地址
   # 向设备发送的视觉分析的接口地址
   # 如果按下面默认的写法，系统会自动生成视觉识别地址，并输出在启动日志里，这个地址你可以直接用浏览器访问确认一下
   # 当你使用docker部署或使用公网部署(使用ssl、域名)时，不一定准确
   # 所以如果你使用docker部署时，将vision_explain设置成局域网地址
   # 如果你使用公网部署时，将vision_explain设置成公网地址
-  vision_explain: http://47.108.216.163:8003/mcp/vision/explain
+  vision_explain: http://111.10.160.135:8003/mcp/vision/explain
   # OTA返回信息时区偏移量
   timezone_offset: +8
   # 认证配置
@@ -185,17 +185,27 @@ plugins:
     max_results: 5
     # 秘塔API Key（mk-前缀） / Tavily API Key（tvly-前缀）
     api_key: "mk-xxx"
-  # AI 绘画插件配置（把 tu_ai.py 的绘图能力做成 MCP 工具）
-  # 生成 200×200 墨水屏 .bin，通过 WebSocket 发送给设备显示
+  # AI 绘画插件配置
+  # 默认按「设备在 hello.features.display 里上报的屏幕」出图：
+  #   {"features":{"mcp":true,"display":{"width":466,"height":466,"shape":"round"}}}
+  # 设备未上报时使用下面的 default_screen。
   draw_image:
     # SiliconFlow 生图 API Key（智控台模式下由「编辑功能 -> AI画图」下发，此处留空占位）
     # 优先读取环境变量 SILICONFLOW_API_KEY
     api_key: ""
     model: "Kwai-Kolors/Kolors"
-    size: [200, 200]          # ESP32 墨水屏分辨率
-    contrast_factor: 3.0      # 对比度增强倍数 (3.0 - 5.0)
-    threshold: 160            # 二值化阈值 (0-255)
+    # ---- 设备未上报屏幕信息时的兜底屏幕 ----
+    default_screen:
+      width: 466
+      height: 466
+      shape: "round"     # round | rect
+    api_size: ""         # 留空 = 按目标尺寸自动选（方形目标 -> 1024x1024）
+    jpeg_quality: 85     # 466x466 约 80KB，base64 后约 105KB
+    bg_color: "#000000"  # 圆屏四角填充色（JPEG 没有透明通道）
+    supersample: 4       # 圆形遮罩抗锯齿超采样倍数，1 = 关闭
+    max_message_bytes: 524288   # 超过则自动降质重编码，防止设备收包缓冲溢出
     output_dir: "./sd_images_test"
+    save_preview: true   # 落盘 .jpg 预览，方便肉眼确认圆形遮罩
     description: "当用户要求画画、画一个东西、画只小动物时调用，把要画的内容传给 item 参数"
 # 声纹识别配置
 voiceprint:
@@ -314,7 +324,7 @@ Intent:
       # play_music是服务器自带的音乐播放，hass_play_music是通过home assistant控制的独立外部程序音乐播放
       # 如果用了hass_play_music，就不要开启play_music，两者只留一个
       - play_music
-      - draw_image                # AI 绘画（生成墨水屏图片并显示）
+      - draw_image                # AI 绘画（按设备上报的屏幕尺寸生成图片并显示）
       #- hass_state
       #- hass_play_music
 

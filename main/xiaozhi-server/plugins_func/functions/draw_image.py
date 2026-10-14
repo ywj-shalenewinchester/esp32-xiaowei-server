@@ -1,9 +1,9 @@
-"""AI 绘画工具（画到墨水屏）
+"""AI 绘画工具（画到设备屏幕）
 
 当用户说出「画画 / 画一个 / 画只 / 画一条 …」等意图时，由 LLM 调用本工具：
-  1. 调用 SiliconFlow 生图
-  2. 转成 200×200 墨水屏 .bin
-  3. 通过 WebSocket 发送给设备，由设备端 EPD_DisplayBitmap 刷屏
+  1. 从 conn.screen 取设备上报的屏幕尺寸（未上报则走配置/内置兜底）
+  2. 调用 SiliconFlow 生图，缩放到屏幕尺寸，圆屏加圆形遮罩
+  3. 编码成 JPEG，通过 WebSocket 发送给设备显示
 """
 
 import asyncio
@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from core.handle.sendAudioHandle import send_display_image, send_display_message
-from core.utils.draw_image_generator import generate_drawing
+from core.utils.draw_image_generator import generate_drawing, resolve_screen
+from core.utils.screen_info import describe_screen
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -46,32 +47,37 @@ draw_image_function_desc = {
 @register_function("draw_image", draw_image_function_desc, ToolType.SYSTEM_CTL)
 async def draw_image(conn: "ConnectionHandler", item: str):
     try:
+        cfg = conn.config.get("plugins", {}).get("draw_image", {})
+        # 设备在 hello 里上报的屏幕；None 表示未上报，走配置/内置兜底。
+        # resolve_screen 是纯函数且 O(1)，在事件循环里调用没问题。
+        screen = resolve_screen(cfg, getattr(conn, "screen", None))
+        logger.bind(tag=TAG).info(f"draw_image 目标屏幕: {describe_screen(screen)}")
+
         # 先告诉设备正在绘制
         try:
             await send_display_message(conn, f"正在画 {item} ...")
         except Exception as e:
             logger.bind(tag=TAG).warning(f"发送绘制提示失败: {e}")
 
-        cfg = conn.config.get("plugins", {}).get("draw_image", {})
+        # 生图 + 缩放 + 编码是阻塞操作（requests + PIL），丢到线程池避免卡事件循环。
+        # 注意不要把 conn 传进线程 —— 非事件循环线程碰 asyncio/websocket 状态会出事。
+        result = await asyncio.to_thread(generate_drawing, item, cfg, screen)
 
-        # 生图 + 转 .bin 是阻塞操作（requests + PIL），丢到线程池避免卡事件循环
-        result = await asyncio.to_thread(generate_drawing, item, cfg)
-
-        # 把墨水屏 .bin 发给设备
         await send_display_image(
             conn,
-            result["bin_bytes"],
+            result["image_bytes"],
             width=result["width"],
             height=result["height"],
-            image_format="epaper_bin",
+            is_round=result["round"],
         )
 
         logger.bind(tag=TAG).info(
-            f"已生成并发送图片: {item} -> {result['bin_path']} ({len(result['bin_bytes'])} 字节)"
+            f"已生成并发送图片: {item} -> {result['preview_path']} "
+            f"({result['width']}x{result['height']}, {len(result['image_bytes'])} 字节)"
         )
         return ActionResponse(
             action=Action.REQLLM,
-            result=f"已成功把「{item}」画到设备墨水屏上，并已发送到设备屏幕显示。",
+            result=f"已成功把「{item}」画到设备屏幕上并发送显示。",
             response=f"已经为你画好了{item}，快看看屏幕上吧",
         )
 

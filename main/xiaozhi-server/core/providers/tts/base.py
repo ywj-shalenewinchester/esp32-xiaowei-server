@@ -20,6 +20,7 @@ from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
 from core.handle.sendAudioHandle import sendAudioMessage
 from core.utils.util import audio_bytes_to_data_stream, audio_to_data_stream
+from core.utils.turn_timer import mark as turn_mark
 from core.providers.tts.dto.dto import (
     TTSMessageDTO,
     SentenceType,
@@ -116,6 +117,14 @@ class TTSProviderBase(ABC):
 
     def handle_opus(self, opus_data: bytes):
         logger.bind(tag=TAG).debug(f"推送数据到队列里面帧数～～ {len(opus_data)}")
+        # TTFT：第一帧合成音频入队（采样率转换 + opus 编码完成）
+        # 只在首次标记成功时打一行：该行出现即证明此处可达且 conn/timer 都在；
+        # 若设备已出声但这行始终不出现，说明这个回调不是实际生效的合成出口。
+        _marked = turn_mark(self.conn, "tts_first_audio", getattr(self, 'current_sentence_id', None))
+        if _marked is not None:
+            logger.bind(tag=TAG).info(
+                f"[TTFT] TTS首帧已标记 +{_marked * 1000:.0f}ms (conn={type(self.conn).__name__})"
+            )
         self.tts_audio_queue.put((SentenceType.MIDDLE, opus_data, None, getattr(self, 'current_sentence_id', None)))
 
     def handle_audio_file(self, file_audio: bytes, text):

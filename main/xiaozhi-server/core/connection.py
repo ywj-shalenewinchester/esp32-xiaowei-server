@@ -45,6 +45,7 @@ from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
+from core.utils.turn_timer import mark as turn_mark, start_turn
 
 
 TAG = __name__
@@ -195,6 +196,11 @@ class ConnectionHandler:
 
         # {"mcp":true} 表示启用MCP功能
         self.features = None
+
+        # 设备在 hello.features.display 里上报的屏幕信息
+        # {"width":466,"height":466,"shape":"round","source":"device"}
+        # None 表示设备未上报 —— 兜底逻辑在 core/utils/draw_image_generator.resolve_screen()
+        self.screen = None
 
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
@@ -1065,6 +1071,9 @@ class ConnectionHandler:
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
+            # 兜底起表：chat_and_close 等入口不经过 startToChat。
+            # 已存在未结束的 timer 会复用，不冲掉 VAD 记下的 T0。
+            start_turn(self)
             current_sentence_id = str(uuid.uuid4().hex)
             self.sentence_id = current_sentence_id  # 更新共享属性
             self.dialogue.put(Message(role="user", content=query))
@@ -1121,6 +1130,8 @@ class ConnectionHandler:
                     self.memory.query_memory(query), self.loop
                 )
                 memory_str = future.result()
+            # TTFT：记忆检索结束（阻塞的 future.result()，外部 SDK 调用）
+            turn_mark(self, "mem_done", current_sentence_id)
 
             # 仅在该说话人首次出现时把身份注入 system，之后靠对话历史首轮保留，
             # 避免每轮在 system 重复出现名字诱导模型反复称呼
@@ -1130,21 +1141,40 @@ class ConnectionHandler:
                 self.system_introduced_speakers.add(cs)
                 speaker_for_system = cs
 
+            # TTFT：请求准备完毕，准备组装对话体
+            turn_mark(self, "llm_req", current_sentence_id)
+
+            # 组装对话体（system + 记忆 + few-shot + 历史）。这一步原本内联在两个分支的
+            # 实参里，会被算进"网络首字节"，把服务端组装和 prefill 混为一谈；提出来单独
+            # 计时，并打印体积——prefill 耗时几乎线性于 prompt 长度。
+            llm_dialogue = self.dialogue.get_llm_dialogue_with_memory(
+                memory_str, self.config.get("voiceprint", {}), speaker_for_system
+            )
+            prompt_chars = sum(
+                len(m.get("content") or "")
+                for m in llm_dialogue
+                if isinstance(m.get("content"), str)
+            )
+            self.logger.bind(tag=TAG).info(
+                f"[TTFT] 请求体: 对话{len(llm_dialogue)}条 / {prompt_chars}字"
+                f" / 工具{len(functions) if functions else 0}个"
+                f"(schema{len(json.dumps(functions, ensure_ascii=False)) if functions else 0}字)"
+                f" / 记忆{len(memory_str or '')}字"
+            )
+            # TTFT：对话体组装完毕，此后是网络往返 + prefill
+            turn_mark(self, "llm_sent", current_sentence_id)
+
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {}), speaker_for_system
-                    ),
+                    llm_dialogue,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
@@ -1160,12 +1190,16 @@ class ConnectionHandler:
             for response in llm_responses:
                 if self.client_abort:
                     break
+                # TTFT：模型开始吐字节（网络往返 + prefill 结束）
+                turn_mark(self, "llm_first_chunk", current_sentence_id)
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
                     if "content" in response:
                         content = response["content"]
                         tools_call = None
                     if content is not None and len(content) > 0:
+                        # TTFT：首个可播内容（与首字节的差值 = 模型"思考"耗时）
+                        turn_mark(self, "llm_first_token", current_sentence_id)
                         content_arguments += content
 
                     if not tool_call_flag and content_arguments.startswith("<tool_call>"):
@@ -1191,6 +1225,9 @@ class ConnectionHandler:
                                     new_part = self._clean_response_garbage(new_part)
                                     if new_part:
                                         tc["_da_sent"] = safe_end
+                                        # TTFT：首个可播内容。模型走 direct_answer 时答案
+                                        # 从工具参数流出，下面的 content 恒为空，标记只能打在这里。
+                                        turn_mark(self, "llm_first_token", current_sentence_id)
                                         self.tts.tts_text_queue.put(
                                             TTSMessageDTO(
                                                 sentence_id=current_sentence_id,
@@ -1212,6 +1249,8 @@ class ConnectionHandler:
                     emotion_flag = False
 
                 if content is not None and len(content) > 0:
+                    # TTFT：首个可播内容（与首字节的差值 = 模型"思考"耗时）
+                    turn_mark(self, "llm_first_token", current_sentence_id)
                     if not tool_call_flag:
                         response_message.append(content)
                         self.tts.tts_text_queue.put(

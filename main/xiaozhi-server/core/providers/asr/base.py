@@ -18,6 +18,7 @@ from core.handle.receiveAudioHandle import startToChat
 from core.handle.reportHandle import enqueue_asr_report
 from core.utils.util import remove_punctuation_and_length
 from core.handle.receiveAudioHandle import handleAudioMessage
+from core.utils.turn_timer import mark as turn_mark
 from typing import Optional, Tuple, List, NamedTuple, TYPE_CHECKING
 
 
@@ -166,6 +167,8 @@ class ASRProviderBase(ABC):
             if text_len > 0:
                 audio_snapshot = asr_audio_task.copy()
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
+                # TTFT：ASR 出文本，进入对话
+                turn_mark(conn, "asr_done")
                 # 使用自定义模块进行上报
                 await startToChat(conn, enhanced_text)
         except Exception as e:

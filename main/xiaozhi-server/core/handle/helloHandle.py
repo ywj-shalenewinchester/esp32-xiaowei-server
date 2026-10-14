@@ -13,6 +13,11 @@ from core.providers.tts.dto.dto import SentenceType
 from core.utils.wakeup_word import WakeupWordsConfig
 from core.handle.sendAudioHandle import sendAudioMessage, send_tts_message
 from core.utils.util import remove_punctuation_and_length, opus_datas_to_wav_bytes
+from core.utils.screen_info import (
+    normalize_screen,
+    describe_screen,
+    declares_monochrome,
+)
 from core.providers.tools.device_mcp import MCPClient, send_mcp_initialize_message
 
 TAG = __name__
@@ -59,6 +64,27 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         if features.get("aec"):
             conn.logger.bind(tag=TAG).debug("客户端启用了服务端AEC")
             conn.client_aec = True
+
+        # 屏幕信息（可选）：设备上报自己的屏幕，供 AI 画图按尺寸出图
+        # {"width":466,"height":466,"shape":"round","color":true}
+        # 这里只在设备真的上报时才赋值；未上报就留 None，
+        # 让 draw_image_generator.resolve_screen() 去走配置/内置兜底。
+        display = features.get("display")
+        if display is not None:
+            screen = normalize_screen(display)
+            if screen:
+                conn.screen = screen
+                conn.logger.bind(tag=TAG).info(
+                    f"客户端屏幕: {describe_screen(screen)}"
+                )
+                if declares_monochrome(display):
+                    conn.logger.bind(tag=TAG).warning(
+                        "客户端上报 color=false，但服务端已移除黑白墨水屏支持，将按彩色出图"
+                    )
+            else:
+                conn.logger.bind(tag=TAG).warning(
+                    f"客户端上报的 display 无法解析，将使用服务端默认屏幕: {display!r}"
+                )
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 

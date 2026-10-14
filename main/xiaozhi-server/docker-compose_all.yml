@@ -21,6 +21,9 @@ services:
       - seccomp:unconfined
     environment:
       - TZ=Asia/Shanghai
+      # 日志 sink 是 sys.stdout，Docker 下非 tty 会块缓冲，
+      # 不加这行 docker logs 会长时间空白、看不到延迟埋点。
+      - PYTHONUNBUFFERED=1
     volumes:
       # 配置文件目录
       - ./data:/opt/xiaozhi-esp32-server/data

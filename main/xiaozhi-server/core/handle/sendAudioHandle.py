@@ -11,6 +11,7 @@ from core.utils import textUtils
 from core.utils.util import audio_to_data
 from core.providers.tts.dto.dto import SentenceType
 from core.utils.audioRateController import AudioRateController
+from core.utils.turn_timer import mark as turn_mark
 
 TAG = __name__
 # 音频帧时长（毫秒）
@@ -42,6 +43,16 @@ async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text
         else:
             # 新句子或流控器未初始化，立即发送
             await send_tts_message(conn, "sentence_start", text)
+
+    # TTFT：第一帧"真实"音频交给发送。必须判空——TTS 会先投一条 audios=[] 的
+    # SentenceType.FIRST 控制消息（只为把 text 带给设备），若在它上面标记，
+    # "下发设备"量的就不是首帧音频，而且汇总会提前打印、让 TTS首帧 永远缺席。
+    if audios is not None and len(audios) > 0:
+        if turn_mark(conn, "device_first_frame", sentence_id) is not None:
+            timer = getattr(conn, "turn_timer", None)
+            if timer is not None:
+                conn.logger.bind(tag=TAG).info(timer.summary())
+                timer.finish()
 
     await sendAudio(conn, audios)
     # 发送句子开始消息
@@ -357,21 +368,24 @@ async def send_display_message(conn: "ConnectionHandler", text):
 async def send_display_image(
     conn: "ConnectionHandler",
     image_bytes: bytes,
-    width: int = 200,
-    height: int = 200,
-    image_format: str = "epaper_bin",
+    width: int,
+    height: int,
+    is_round: bool = False,
 ):
-    """发送图片数据到设备显示（墨水屏 .bin 裸位图，base64 编码）。
+    """发送图片数据到设备显示（JPEG，base64 编码）。
 
-    设备端收到 type=="display" 的消息后，对 image 做 base64 解码，
-    再调用 epaper 驱动的 EPD_DisplayBitmap 刷屏（参考 09_LVGL_V8_Test）。
+    设备端收到 type=="display" 的消息后，对 image 做 base64 解码，再用
+    baseline JPEG 解码器解出位图绘制到屏幕。
+
+    is_round 对应消息里的 round 字段，提示面板是圆形（四角已由服务端填成纯色）。
     """
     message = {
         "type": "display",
         "image": base64.b64encode(image_bytes).decode("ascii"),
-        "format": image_format,
+        "format": "jpeg",
         "width": width,
         "height": height,
+        "round": bool(is_round),
         "session_id": conn.session_id,
     }
     await conn.websocket.send(json.dumps(message))

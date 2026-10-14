@@ -4,6 +4,7 @@ import numpy as np
 import onnxruntime
 from config.logger import setup_logging
 from core.providers.vad.base import VADProviderBase
+from core.utils.turn_timer import start_turn
 
 TAG = __name__
 logger = setup_logging()
@@ -106,6 +107,8 @@ class VADProvider(VADProviderBase):
                 if conn.client_have_voice and not client_have_voice:
                     stop_duration = time.time() * 1000 - conn.vad_last_voice_time
                     if stop_duration >= self.silence_threshold_ms:
+                        # TTFT 计时起点：用户说完话这一刻（确定是新的一轮）
+                        start_turn(conn, force=True)
                         conn.client_voice_stop = True
                 if client_have_voice:
                     conn.client_have_voice = True

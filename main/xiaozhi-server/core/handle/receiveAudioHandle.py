@@ -10,6 +10,7 @@ from core.handle.abortHandle import handleAbortMessage
 from core.handle.intentHandler import handle_user_intent
 from core.utils.output_counter import check_device_output_limit
 from core.handle.sendAudioHandle import send_stt_message, SentenceType
+from core.utils.turn_timer import start_turn
 
 TAG = __name__
 
@@ -41,6 +42,9 @@ async def resume_vad_detection(conn: "ConnectionHandler"):
 
 
 async def startToChat(conn: "ConnectionHandler", text):
+    # 兜底起表：手动模式/文本消息没有 VAD，不会在 silero 里建 timer。
+    # 已存在且未结束的 timer 会被复用，不会冲掉 VAD 记下的 T0。
+    start_turn(conn)
     # 检查输入是否是JSON格式（包含说话人信息）
     speaker_name = None
     actual_text = text

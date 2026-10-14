@@ -1,69 +1,130 @@
-# AI 绘画 → 墨水屏显示（draw_image MCP 工具）
+# AI 绘画 → 设备屏幕显示（draw_image 工具）
 
-把 `tu_ai.py` 的「文生图 + 转墨水屏 `.bin`」能力做成 xiaozhi-server 里的一个可被大模型调用的工具（本项目里的 MCP/function-call 机制）。当用户对设备说「画一只小狗」时，LLM 调用 `draw_image`，服务端用 SiliconFlow 生图、转成 200×200 墨水屏裸位图，再通过 WebSocket 发给设备刷屏。
+当用户对设备说「画一只小狗」时，LLM 调用服务端的 `draw_image` 工具：服务端用 SiliconFlow 生图，按**设备上报的屏幕尺寸**缩放、给圆屏加圆形遮罩、编码成 JPEG，再通过 WebSocket 发给设备显示。
 
-## 一、改动记录（本次改了什么）
+设备在连接时的 `hello` 消息里上报自己的屏幕尺寸，所以同一套服务端可以同时带 466×466 / 560×560 等不同尺寸的设备。
+
+## 一、改动记录
 
 | 文件 | 操作 | 说明 |
 | --- | --- | --- |
-| `core/utils/draw_image_generator.py` | 新增 | 把 `tu_ai.py` 的生图逻辑重构为可复用、可配置模块，返回 `.bin` 的 bytes |
-| `plugins_func/functions/draw_image.py` | 新增 | 注册 `draw_image` 工具（`ToolType.SYSTEM_CTL`），生图并发送到设备 |
-| `core/handle/sendAudioHandle.py` | 修改 | 新增 `send_display_image()`，发送 `type=="display"` 图片消息 |
-| `config.yaml` | 修改 | 新增 `plugins.draw_image` 配置；`Intent.intent_llm.functions` / `Intent.function_call.functions` 追加 `draw_image` |
-| `requirements.txt` | 修改 | 新增 `Pillow==11.1.0`（生图所需的 PIL） |
+| `core/utils/screen_info.py` | 新增 | 解析/校验设备上报的屏幕信息，纯函数、无 IO |
+| `core/utils/draw_image_generator.py` | 重写 | 按目标尺寸生图 + 缩放 + 圆形遮罩 + JPEG 编码，返回 bytes |
+| `core/handle/helloHandle.py` | 修改 | 解析 `hello.features.display`，落到 `conn.screen` |
+| `core/connection.py` | 修改 | 声明 `self.screen = None` |
+| `core/handle/sendAudioHandle.py` | 修改 | `send_display_image()` 发送 `format="jpeg"` + `round` 字段 |
+| `plugins_func/functions/draw_image.py` | 修改 | 取 `conn.screen`，透传给生成器 |
+| `config.yaml` | 修改 | `plugins.draw_image` 改为 `default_screen` + JPEG 参数 |
 
-### 关键设计
-- **图片格式**：与 `09_LVGL_V8_Test` 的 `epaper_driver_bsp::EPD_DisplayBitmap` 完全一致 —— 200×200、1-bit、MSB 高位在前、1=白 0=黑，共 5000 字节（无文件头、无调色板）。
-- **发送通道**：新增 WebSocket 消息 `{"type":"display","image":"<base64>","format":"epaper_bin","width":200,"height":200}`。
-- **API Key**：优先读环境变量 `SILICONFLOW_API_KEY`，否则读 `config.yaml` 的 `plugins.draw_image.api_key`。
+> 旧版本走的是 200×200 黑白墨水屏 `.bin`（`EPD_DisplayBitmap`、1-bit、5000 字节裸位图）。该链路已**整体移除**。
 
-## 二、服务端配置与启用
+## 二、协议
 
-1. 安装依赖（新增了 Pillow）：
-   ```bash
-   pip install Pillow==11.1.0
-   ```
+### 设备 → 服务端：hello 里上报屏幕
 
-2. `config.yaml` 的 `plugins.draw_image` 填好 API Key（已默认填入 tu_ai.py 里的 key）：
-   ```yaml
-   draw_image:
-     api_key: "sk-..."
-     model: "Kwai-Kolors/Kolors"
-     size: [200, 200]
-     contrast_factor: 3.0
-     threshold: 160
-     output_dir: "./sd_images_test"
-   ```
+```json
+{"type": "hello",
+ "audio_params": {"format": "opus", "sample_rate": 24000, "channels": 1, "frame_duration": 60},
+ "features": {
+   "mcp": true,
+   "display": {"width": 466, "height": 466, "shape": "round", "color": true}}}
+```
 
-3. **启用意图识别**：把 `selected_module.Intent` 从 `nointent` 改成 `function_call`（否则工具不会被注入给 LLM）：
-   ```yaml
-   selected_module:
-     Intent: function_call
-   ```
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `width` / `height` | 是 | 屏幕像素尺寸。单边夹到 `[64, 1024]`，小于 64 视为上报错误并回退默认值 |
+| `shape` | 否 | `"round"` \| `"rect"`。缺省时方形按 `round`、非方形按 `rect` |
+| `color` | 否 | 仅为向后兼容保留，服务端已不区分。上报 `false` 会记一条 WARNING |
 
-4. 确认 `Intent.function_call.functions` 里包含 `draw_image`（已加入）。
+整条 `display` 的容错规则：
 
-## 三、设备端接入（已实现，代码在 my-esp32-main）
+- 不带 `width`/`height`（如旧固件发 `{"display": true}`）→ 忽略，用服务端默认屏幕
+- 长短边比 > 4:1 → 忽略，用服务端默认屏幕
+- 非 dict 或解析不出数字 → 忽略，用服务端默认屏幕
 
-设备固件是 `G:\to2\my-esp32-main`（xiaozhi），墨水屏板卡为 **waveshare ESP32-S3 ePaper 1.54（200×200）**，引脚 BUSY=8 / RST=9 / DC=10 / CS=11 / SCK=12 / MOSI=13，与 `09_LVGL_V8_Test` 一致。
+被忽略时服务端会打 WARNING 日志，图照常能画。
 
-服务端发送 `{"type":"display","image":"<base64 .bin>","width":200,"height":200}`，设备端改动如下：
+### 服务端 → 设备：图片消息
 
-| 文件 | 改动 |
-| --- | --- |
-| `main/display/display.h` | 基类 `Display` 新增虚方法 `DisplayEpaperBitmap(const uint8_t* bitmap, int width, int height)`（默认空实现，非墨水屏显示类不受影响） |
-| `main/application.cc` | 收包分支新增 `type=="display"`：`image` 做 `mbedtls_base64_decode` → `Schedule` 到显示任务调 `DisplayEpaperBitmap`；新增 `#include <mbedtls/base64.h>` |
-| `main/boards/waveshare/esp32-s3-epaper-1.54/custom_lcd_display.h` | `CustomLcdDisplay` 声明 `DisplayEpaperBitmap` 重写 |
-| `main/boards/waveshare/esp32-s3-epaper-1.54/custom_lcd_display.cc` | 实现 `DisplayEpaperBitmap`：校验尺寸 → `memcpy(buffer, bitmap, 5000)` → `EPD_DisplayPart()` 局部刷新 |
+```json
+{"type": "display",
+ "image": "<base64 JPEG>",
+ "format": "jpeg",
+ "width": 466,
+ "height": 466,
+ "round": true,
+ "session_id": "..."}
+```
 
-**格式一致性**：服务端 `.bin`（行优先、MSB 高位在前、1=白）与 `CustomLcdDisplay::buffer` 布局逐字节一致（对照 `EPD_DrawColorPixel` 的 `index = y*25 + x/8`、`bit = 7 - x%8`、白=置位），所以 `memcpy` 后直接刷屏即可，无需二次转换。
+`image` 是 **baseline JPEG**（非 progressive），`round=true` 表示面板是圆形——四角已由服务端填成纯色（默认黑）。
 
-**冻结窗口**：刷图后冻结 LVGL 刷屏 5 秒（`EPAPER_IMAGE_DISPLAY_MS`，可改）。期间 `lvgl_flush_cb` 直接跳过（仍调用 `lv_disp_flush_ready`），状态栏/聊天/表情等刷新都不会覆盖图片，窗口结束自动恢复 UI。
+## 三、服务端配置
 
-> 若你用的是 **C6 版**墨水屏板卡（`waveshare/esp32-c6-epaper-1.54`），需在它的 `custom_lcd_display.{h,cc}` 里按同样方式补上 `DisplayEpaperBitmap`。
+`config.yaml` 的 `plugins.draw_image`：
 
-## 四、端到端验证
+```yaml
+draw_image:
+  api_key: ""              # 优先读环境变量 SILICONFLOW_API_KEY
+  model: "Kwai-Kolors/Kolors"
+  default_screen:          # 设备未上报屏幕信息时的兜底
+    width: 466
+    height: 466
+    shape: "round"
+  api_size: ""             # 留空 = 按目标尺寸自动选（方形目标 -> 1024x1024）
+  jpeg_quality: 85         # 466x466 约 80KB，base64 后约 105KB
+  bg_color: "#000000"      # 圆屏四角填充色（JPEG 没有透明通道）
+  supersample: 4           # 圆形遮罩抗锯齿超采样倍数，1 = 关闭
+  max_message_bytes: 524288  # 超过则自动降质重编码
+  output_dir: "./sd_images_test"
+  save_preview: true       # 落盘 .jpg 预览，方便肉眼确认圆形遮罩
+```
 
-1. `python -m py_compile` 编译 `core/utils/draw_image_generator.py`、`plugins_func/functions/draw_image.py`、`core/handle/sendAudioHandle.py` 确认无语法错误。
-2. 单测生图：调用 `generate_drawing("小狗", cfg)`，确认产出 `小狗.bin`（5000 字节）+ `小狗.bmp`。
-3. 真机：`Intent: function_call`，对设备说「画一只小狗」→ 服务端日志出现 `执行工具: draw_image` → 设备墨水屏刷出图案。
+屏幕优先级：**设备上报 > `default_screen` > 内置默认（466 圆屏）**。
+
+### 启用步骤
+
+1. 装依赖：`pip install Pillow`（`requirements.txt` 里已含 `Pillow==11.1.0`）
+2. `config.yaml` 的 `selected_module.Intent` 设为 `function_call`（或 `intent_llm`），否则工具不会注入给 LLM
+3. 确认 `Intent.function_call.functions` 里包含 `draw_image`
+4. 配好 API Key：`config.yaml` 的 `plugins.draw_image.api_key`，或环境变量 `SILICONFLOW_API_KEY`
+
+> ⚠️ **智控台（manager-api）模式下 `config.yaml` 的 `plugins` 会被整体丢弃**（见 `core/connection.py` 里 `self.config["plugins"] = plugin_from_server`）。此时 API Key 只能来自 `SILICONFLOW_API_KEY` 环境变量。控制台里没有 `draw_image` 条目时，插件配置为 `{}`，会走内置默认屏幕，行为正常。
+
+## 四、设备端接入（待实现）
+
+固件仓库（`my-esp32-main`）需要做三件事：
+
+1. **hello 上报屏幕**——在已有的 hello 消息里带上 `features.display`（见上面的协议）。
+2. **处理 `type == "display"`**——对 `image` 做 base64 解码，得到 JPEG 字节流，交给设备上的 **baseline JPEG** 解码器：
+   - LVGL 自带解码器（启用 `LV_USE_SJPG` / 注册 `lv_split_jpeg_init()`），或
+   - `esp_jpeg` / `esp_new_jpeg` 组件
+   - ⚠️ **不要用只支持 baseline 的库去解 progressive JPEG** —— 服务端已固定发 baseline
+3. **调大 WebSocket 接收缓冲区**——这条最容易漏：
+
+   | | 旧墨水屏 | 现在 |
+   | --- | --- | --- |
+   | 原始帧 | 5000 B | 60–250 KB |
+   | base64 后 | ~6.7 KB | **80–330 KB** |
+
+   旧墨水屏的帧只有 6.7 KB，而 466×466 的 JPEG base64 后约 105 KB。如果 `esp_websocket_client` 的接收缓冲装不下，帧会分片到达，朴素的 `cJSON_Parse` 会直接失败。**建议配置 ≥256 KB**（`max_message_bytes` 默认 512 KB，服务端会在超限时自动降质）。
+
+## 五、端到端验证
+
+服务端侧（无需真机，`_call_image_api` 是唯一的网络出口，可以直接打桩替换）：
+
+1. `py_compile` 过一遍改动的文件
+2. 用 `Image.new("RGB", (1024, 1024), ...)` 当假图，跑 `_fit_to_target` → `compose_round` → `encode_jpeg`，断言尺寸、四角为背景色、中心为画面、JPEG 首尾字节正确
+3. 断言圆形遮罩边缘有中间 alpha（平滑过渡），不是 `255 → 0` 硬台阶——否则说明超采样没生效
+
+真机侧：
+
+4. 设备连上 → 服务端日志出现 `客户端屏幕: 466x466 round color(device)`
+5. 说「画一只小狗」→ 日志依次出现 `draw_image 目标屏幕: ...` → `执行工具: draw_image` → 发送行含 `466x466`
+6. 打开 `sd_images_test/` 下的 `.jpg` 预览，肉眼确认：圆形、四角纯黑、主体没被遮罩切掉、无文字水印
+7. 容错：让设备上报 `{"width": 99999, "height": -5}` → 日志显示夹取后的值，图仍能画出来；设备不上报 → 日志显示 `466x466 round color(builtin)`
+
+## 六、已知限制
+
+- **JPEG 没有 alpha**，圆屏四角只能填纯色。物理圆形面板自己做遮罩没问题；方形面板塞进圆边框会露出黑角。
+- **服务端不做并发限制**：生图 + 编码是阻塞操作，跑在 `conn.executor` 线程池里，最坏情况（`timeout` 45s + 下载 30s）会占住一个 worker。设备侧表现为这段时间没有响应。
+- **提示词已针对圆屏优化**：圆屏的提示词里会追加 "nothing important in the corners because the display is circular"，避免主体被遮罩裁掉。
