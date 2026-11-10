@@ -166,26 +166,28 @@ class PromptManager:
     def _get_weather_info(self, conn: "ConnectionHandler", location: str) -> str:
         """获取天气信息"""
         try:
-            # 先从缓存获取
-            cached_weather = self.cache_manager.get(self.CacheType.WEATHER, location)
-            if cached_weather is not None:
-                return cached_weather
+            # 缓存里存的是结构化 dict（见 get_weather_data），文本报告在这里现渲染。
+            # 缓存键与 get_weather_data 保持一致，两边不会各拉一次和风。
+            from plugins_func.functions.get_weather import (
+                get_weather_data,
+                format_weather_report,
+            )
 
-            # 缓存未命中，调用 async get_weather 函数
+            cache_key = f"qweather_weather_{location}"
+            cached_weather = self.cache_manager.get(self.CacheType.WEATHER, cache_key)
+            if cached_weather is not None:
+                return format_weather_report(cached_weather)
+
+            # 缓存未命中，调用 async 取数函数
             # Windows ProactorEventLoop 不支持 run_coroutine_threadsafe().result()
             # 因此用 call_soon_threadsafe 提交任务 + threading.Event 等待结果
             # 注意：Event.wait() 只阻塞当前线程池线程，不阻塞主事件循环
-            from plugins_func.functions.get_weather import get_weather
-            from plugins_func.register import ActionResponse
-
             result_holder = []
             exception_holder = []
 
             async def _call():
                 try:
-                    result_holder.append(
-                        await get_weather(conn, location=location, lang="zh_CN")
-                    )
+                    result_holder.append(await get_weather_data(conn, location))
                 except Exception as e:
                     exception_holder.append(e)
                 finally:
@@ -197,11 +199,9 @@ class PromptManager:
                 raise TimeoutError("获取天气信息超时")
             if exception_holder:
                 raise exception_holder[0]
-            result = result_holder[0]
-            if isinstance(result, ActionResponse):
-                weather_report = result.result
-                self.cache_manager.set(self.CacheType.WEATHER, location, weather_report)
-                return weather_report
+            data = result_holder[0]
+            if isinstance(data, dict):
+                return format_weather_report(data)
             return "天气信息获取失败"
 
         except Exception as e:

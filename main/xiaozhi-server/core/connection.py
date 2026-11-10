@@ -663,8 +663,49 @@ class ConnectionHandler:
             """注入工具调用few-shot示例（仅function_call模式）"""
             self._inject_tool_call_fewshot()
 
+            """下发天气给带屏设备（放在 _init_prompt_enhancement 之后，走它的缓存）"""
+            self._push_weather_to_device()
+
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+
+    def _push_weather_to_device(self):
+        """把本地天气推给带屏设备（设备上的天气页显示的就是这一份）。
+
+        时机刻意排在这里：上面的 _init_prompt_enhancement() 已经把天气预热进缓存，
+        所以这一步是纯缓存命中，不会为了设备再打一次和风接口。
+
+        本方法跑在线程池线程里（_initialize_components 的调用方是 executor.submit），
+        没有运行中的事件循环，所以用 call_soon_threadsafe 把协程丢回主循环 ——
+        和 prompt_manager._get_weather_info 同一套写法。
+        """
+        if not self.loop:
+            return
+
+        async def _push():
+            try:
+                # 这里要等一下：后台初始化和设备的第一条 hello 是**并行**的，
+                # 谁先到不固定（hello 里的 features.display 决定这台设备有没有屏幕）。
+                # 最多等 5 秒，等不到就当它没有屏幕，安静退出。
+                for _ in range(50):
+                    if self.screen is not None:
+                        break
+                    await asyncio.sleep(0.1)
+                if self.screen is None:
+                    self.logger.bind(tag=TAG).debug("设备未上报屏幕，跳过天气下发")
+                    return
+
+                from plugins_func.functions.get_weather import push_weather_to_device
+
+                await push_weather_to_device(self)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(f"天气下发设备失败: {e}")
+
+        try:
+            self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_push()))
+        except RuntimeError:
+            # 事件循环已经关了（设备刚建连就断开），不用管
+            pass
 
     def _init_prompt_enhancement(self):
 
